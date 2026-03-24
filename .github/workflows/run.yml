@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - name: Checkout codes
         uses: actions/checkout@v5
@@ -25,12 +25,16 @@ jobs:
           python-version: "3.10"
           
       - name: 开始
+        uses: nick-fields/retry@v3
         env:
             CONFIG: ${{ secrets.CONFIG }}
             AES_KEY: ${{ secrets.AES_KEY }}
-        run: |
-          pip3 install requests pytz pycryptodome
-          python3 main.py
+        with:
+          timeout_minutes: 2
+          max_attempts: 3
+          command: |
+            pip3 install requests pytz pycryptodome
+            python3 main.py
 
       - name: persist tokens
         run: |

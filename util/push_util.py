@@ -1,7 +1,9 @@
+import html
 import json
-
+import os
+import re
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 
@@ -42,7 +44,7 @@ def push_plus(token, title, content):
     :param content: 推送内容
     :return: none
     """
-    requestUrl = f"http://www.pushplus.plus/send"
+    requestUrl = "http://www.pushplus.plus/send"
     data = {
         "token": token,
         "title": title,
@@ -112,15 +114,24 @@ def push_telegram_bot(bot_token, chat_id, content):
     """
     requestUrl = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
+    # 兼容数字型 chatId 和字符串型 chatId（如 @频道 或 -100开头的群组）
+    chat_id_str = str(chat_id)
+    if chat_id_str.lstrip('-').isdigit():
+        chat_id_value = int(chat_id_str)
+    else:
+        chat_id_value = chat_id_str
+
     payload = {
-        "chat_id": int(chat_id),
+        "chat_id": chat_id_value,
         "text": content,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
-    print(f"post to url: {requestUrl}")
-    print(f"payload: {json.dumps(payload)}")
+    # 不要在日志中打印完整 token
+    masked_token = f"{bot_token[:5]}****" if bot_token else "****"
+    print(f"post to url: https://api.telegram.org/bot{masked_token}/sendMessage")
     try:
-        response = requests.post(requestUrl, json=payload)
+        response = requests.post(requestUrl, json=payload, timeout=15)
         if response.status_code == 200:
             json_res = response.json()
             if json_res.get('ok') is True:
@@ -133,6 +144,94 @@ def push_telegram_bot(bot_token, chat_id, content):
         print(f"telegram bot推送异常: {e}")
     except Exception as e:
         print(f"telegram bot推送发生未知异常: {e}")
+
+
+def get_scheduled_beijing_time():
+    """
+    从 cron_change_time 中解析本次定时任务计划执行时间（北京时间）。
+    该文件由上一次 Random Cron 写入，其中 "next exec time" 即本次 刷步数 的计划时间。
+    """
+    try:
+        with open('cron_change_time', 'r', encoding='utf-8') as f:
+            content = f.read()
+        match = re.search(r'next exec time: UTC\(\d+:\d+\) 北京时间\((\d+):(\d+)\)', content)
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2))
+        now = get_beijing_time()
+        scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # 若解析出的时间在未来 6 小时以上，说明是下一天的计划，回退到昨天
+        if scheduled - now > timedelta(hours=6):
+            scheduled -= timedelta(days=1)
+        return scheduled
+    except Exception:
+        return None
+
+
+def build_workflow_notify_content(workflow_name, conclusion, event_name, run_url, show_schedule=False):
+    """构建工作流级通知内容（与具体推送渠道解耦）"""
+    conclusion_text = {
+        "success": "✅ 成功",
+        "failure": "❌ 失败",
+        "cancelled": "⏹️ 已取消",
+    }.get(conclusion, html.escape(str(conclusion)))
+
+    lines = [f"<b>{html.escape(str(workflow_name))} 工作流执行完成</b>"]
+    if event_name:
+        lines.append(f"触发方式：{html.escape(str(event_name))}")
+    lines.append(f"结论：{conclusion_text}")
+    now = get_beijing_time()
+    lines.append(f"执行时间：{now.strftime('%Y-%m-%d %H:%M:%S')}（北京时间）")
+
+    if show_schedule and event_name == "schedule":
+        scheduled = get_scheduled_beijing_time()
+        if scheduled is not None:
+            lines.append(f"计划时间：{scheduled.strftime('%Y-%m-%d %H:%M')}（北京时间）")
+            delay_minutes = int((now - scheduled).total_seconds() // 60)
+            if delay_minutes >= 1:
+                lines.append(f"实际延迟：{delay_minutes} 分钟")
+            elif delay_minutes <= -1:
+                lines.append(f"提前执行：{-delay_minutes} 分钟")
+
+    if run_url:
+        lines.append(f'<a href="{html.escape(str(run_url))}">运行详情</a>')
+    if conclusion == "failure":
+        lines.append("可前往 GitHub Actions 日志查看具体失败原因。")
+    return "\n".join(lines)
+
+
+def push_workflow_notify(workflow_name=None, conclusion=None, event_name=None, run_url=None, show_schedule=None):
+    """
+    工作流级通知：读取 CONFIG 环境变量中的 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，
+    发送一条工作流执行状态消息（含成功/失败/取消、执行时间、可选延迟信息）。
+    未配置 Telegram 时静默跳过，不影响工作流本身。
+    """
+    config_raw = os.environ.get("CONFIG", "")
+    if not config_raw:
+        print("未配置CONFIG，跳过Telegram工作流通知")
+        return
+    try:
+        config = json.loads(config_raw)
+    except Exception as exc:
+        print(f"CONFIG解析失败，跳过Telegram工作流通知: {exc}")
+        return
+
+    token = config.get("TELEGRAM_BOT_TOKEN")
+    chat_id = config.get("TELEGRAM_CHAT_ID")
+    if not token or token == "NO" or not chat_id or chat_id == "NO":
+        print("未配置 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，跳过Telegram工作流通知")
+        return
+
+    workflow_name = workflow_name or os.environ.get("WORKFLOW_NAME", "工作流")
+    conclusion = conclusion or os.environ.get("WORKFLOW_CONCLUSION", "unknown")
+    event_name = event_name or os.environ.get("EVENT_NAME", "")
+    run_url = run_url or os.environ.get("RUN_URL", "")
+    if show_schedule is None:
+        show_schedule = os.environ.get("SHOW_SCHEDULE") == "1"
+
+    content = build_workflow_notify_content(workflow_name, conclusion, event_name, run_url, show_schedule)
+    push_telegram_bot(token, chat_id, content)
+    print("Telegram 工作流通知发送完成")
 
 
 def push_results(exec_results, summary, config: PushConfig):
@@ -226,16 +325,18 @@ def push_to_telegram_bot(exec_results, summary, config: PushConfig):
     # 判断是否需要telegram推送
     if (config.telegram_bot_token and config.telegram_bot_token != '' and config.telegram_bot_token != 'NO' and
             config.telegram_chat_id and config.telegram_chat_id != ''):
-        html = f'<b>{summary}</b>'
+        text = f'<b>{html.escape(str(summary))}</b>'
         if len(exec_results) >= config.push_plus_max:
-            html += '<blockquote>账号数量过多，详细情况请前往github actions中查看</blockquote>'
+            text += '\n<blockquote>账号数量过多，详细情况请前往github actions中查看</blockquote>'
         else:
             for exec_result in exec_results:
                 success = exec_result['success']
+                user = html.escape(str(exec_result['user']))
+                msg = html.escape(str(exec_result['msg']))
                 if success is not None and success is True:
-                    html += f'<pre><blockquote>账号：{exec_result["user"]}</blockquote>刷步数成功，接口返回：<b>{exec_result["msg"]}</b></pre>'
+                    text += f'\n<pre>账号：{user}\n刷步数成功，接口返回：{msg}</pre>'
                 else:
-                    html += f'<pre><blockquote>账号：{exec_result["user"]}</blockquote>刷步数失败，失败原因：<b>{exec_result["msg"]}</b></pre>'
-        push_telegram_bot(config.telegram_bot_token, config.telegram_chat_id, html)
+                    text += f'\n<pre>账号：{user}\n刷步数失败，失败原因：{msg}</pre>'
+        push_telegram_bot(config.telegram_bot_token, config.telegram_chat_id, text)
     else:
         print("未配置 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 跳过telegram推送")

@@ -43,3 +43,17 @@ jobs:
           git add .
           git commit -m "persist tokens trigger by ${{ github.event_name }}"
           git push origin master
+
+      - name: Telegram 工作流通知
+        if: always()
+        continue-on-error: true
+        env:
+            CONFIG: ${{ secrets.CONFIG }}
+            WORKFLOW_NAME: 刷步数
+            WORKFLOW_CONCLUSION: ${{ job.status }}
+            EVENT_NAME: ${{ github.event_name }}
+            RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            SHOW_SCHEDULE: "1"
+        run: |
+          pip3 install requests pytz -q
+          python3 -c "from util.push_util import push_workflow_notify; push_workflow_notify()"

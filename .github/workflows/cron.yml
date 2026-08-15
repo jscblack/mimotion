@@ -26,3 +26,16 @@ jobs:
           current=`TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S'`
           git commit -m "[${current}] random cron trigger by ${{ github.event_name }}"
           git push origin master
+
+      - name: Telegram 工作流通知
+        if: always()
+        continue-on-error: true
+        env:
+          CONFIG: ${{ secrets.CONFIG }}
+          WORKFLOW_NAME: Random Cron
+          WORKFLOW_CONCLUSION: ${{ job.status }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          pip3 install requests pytz -q
+          python3 -c "from util.push_util import push_workflow_notify; push_workflow_notify()"
